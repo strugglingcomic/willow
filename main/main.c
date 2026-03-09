@@ -14,6 +14,7 @@
 #include "input.h"
 #include "log.h"
 #include "network.h"
+#include "sensor.h"
 #include "shared.h"
 #include "slvgl.h"
 #include "system.h"
@@ -176,6 +177,7 @@ err_nvs:
     init_input_key_service();
     init_audio();
     init_lvgl_touch();
+    init_sensor();
     init_display_timer();
 
 #ifndef CONFIG_WILLOW_ETHERNET
