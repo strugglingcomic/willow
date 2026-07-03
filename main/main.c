@@ -8,6 +8,7 @@
 #include "periph_spiffs.h"
 #include "sdkconfig.h"
 
+#include "apps.h"
 #include "audio.h"
 #include "config.h"
 #include "display.h"
@@ -179,6 +180,7 @@ err_nvs:
     init_lvgl_touch();
     init_sensor();
     init_display_timer();
+    willow_apps_init();
 
 #ifndef CONFIG_WILLOW_ETHERNET
     get_mac_address(); // should be on wifi by now; print the MAC

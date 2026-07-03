@@ -1,4 +1,7 @@
+#include "esp_lcd_touch.h"
+
 extern lv_disp_t *ld;
+extern esp_lcd_touch_handle_t hdl_touch;
 extern lv_obj_t *btn_cancel, *lbl_btn_cancel, *lbl_ln1, *lbl_ln2, *lbl_ln3, *lbl_ln4, *lbl_ln5;
 extern int lvgl_lock_timeout;
 

@@ -5,10 +5,14 @@ endif()
 idf_component_register(
     SRC_DIRS
         "."
+        "apps"
+        "apps/mermaid"
         "endpoint"
         "${WILLOW_ETHERNET_SRC_DIRS}"
     INCLUDE_DIRS
         "."
+        "apps"
+        "apps/mermaid"
         "${WILLOW_ETHERNET_SRC_DIRS}"
     PRIV_REQUIRES
         app_update

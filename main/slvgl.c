@@ -10,6 +10,7 @@
 #include "lvgl.h"
 #include "periph_lcd.h"
 
+#include "apps.h"
 #include "audio.h"
 #include "config.h"
 #include "display.h"
@@ -45,6 +46,7 @@ enum esp32_s3_box_touch_t {
     TOUCH_TT21100,
 };
 esp_lcd_panel_handle_t hdl_lcd = NULL;
+esp_lcd_touch_handle_t hdl_touch = NULL;
 int lvgl_lock_timeout;
 lv_disp_t *ld;
 lv_obj_t *btn_cancel, *lbl_btn_cancel, *lbl_ln1, *lbl_ln2, *lbl_ln3, *lbl_ln4, *lbl_ln5;
@@ -60,15 +62,27 @@ void cb_btn_cancel(lv_event_t *ev)
 
 void cb_scr(lv_event_t *ev)
 {
+    // ~400ms until LV_EVENT_LONG_PRESSED plus 15 repeats at ~100ms: hold the
+    // screen for about 2s to launch the easter-egg app
+    static int scr_hold_count = 0;
+
     // printf("cb_scr\n");
     switch (lv_event_get_code(ev)) {
         case LV_EVENT_RELEASED:
+            scr_hold_count = 0;
             reset_timer(hdl_display_timer, config_get_int("display_timeout", DEFAULT_DISPLAY_TIMEOUT), false);
             break;
 
         case LV_EVENT_PRESSED:
+            scr_hold_count = 0;
             reset_timer(hdl_display_timer, config_get_int("display_timeout", DEFAULT_DISPLAY_TIMEOUT), true);
             display_set_backlight(true, false);
+            break;
+
+        case LV_EVENT_LONG_PRESSED_REPEAT:
+            if (++scr_hold_count == 15) {
+                willow_apps_launch(WILLOW_APP_MERMAID);
+            }
             break;
 
         default:
@@ -218,6 +232,8 @@ esp_err_t init_lvgl_touch(void)
             return ret;
         }
     }
+    hdl_touch = hdl_lt;
+
     const lvgl_port_touch_cfg_t cfg_pt = {
         .disp = ld,
         .handle = hdl_lt,
