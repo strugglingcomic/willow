@@ -3,8 +3,6 @@
 
 #include "esp_err.h"
 #include "esp_heap_caps.h"
-#include "esp_lcd_panel_ops.h"
-#include "esp_lcd_touch.h"
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
 #include "esp_timer.h"
@@ -31,15 +29,48 @@ static const char *TAG = "WILLOW/APPS";
 
 static _Atomic bool app_active = false;
 
+// current touch state, fed by LVGL events on the canvas (LVGL task) and
+// consumed once per frame by the app task
+static _Atomic bool touch_pressed = false;
+static _Atomic int touch_x = 0;
+static _Atomic int touch_y = 0;
+
+// full-screen lv_img wrapping the game framebuffer (LV_USE_CANVAS is
+// compiled out of willow's LVGL; for a raw full-frame blit img is equivalent)
+static lv_img_dsc_t app_img_dsc;
+
+static void cb_app_touch(lv_event_t *ev)
+{
+    switch (lv_event_get_code(ev)) {
+        case LV_EVENT_PRESSED:
+        case LV_EVENT_PRESSING: {
+            lv_indev_t *indev = lv_indev_get_act();
+            if (indev == NULL) {
+                break;
+            }
+            lv_point_t p;
+            lv_indev_get_point(indev, &p);
+            touch_x = p.x;
+            touch_y = p.y;
+            touch_pressed = true;
+            break;
+        }
+        case LV_EVENT_RELEASED:
+        case LV_EVENT_PRESS_LOST:
+            touch_pressed = false;
+            break;
+        default:
+            break;
+    }
+}
+
 static void app_task(void *data)
 {
     willow_app_t app = (willow_app_t)data;
 
-    uint16_t *fb = heap_caps_malloc(GAME_W * GAME_H * sizeof(uint16_t), MALLOC_CAP_DMA);
-    if (fb == NULL) {
-        ESP_LOGW(TAG, "no DMA-capable framebuffer memory, falling back to PSRAM");
-        fb = heap_caps_malloc(GAME_W * GAME_H * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
-    }
+    // LVGL flushes copy through the LVGL port's internal DMA bounce buffer,
+    // so the canvas buffer can live in plain (non-DMA) PSRAM
+    uint16_t *fb = heap_caps_malloc(GAME_W * GAME_H * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
     if (fb == NULL) {
         ESP_LOGE(TAG, "failed to allocate framebuffer");
         app_active = false;
@@ -49,35 +80,54 @@ static void app_task(void *data)
 
     ESP_LOGI(TAG, "launching app %d", app);
 
-    // no wake-word interruptions (and less CPU) while playing
+    // no wake-word interruptions (and less CPU) while playing; the recorder
+    // logs "Not in speeching" on every read while wakenet is off, so mute it
     audio_recorder_wakenet_enable(hdl_ar, false);
-    // holding the LVGL mutex parks the LVGL task, making us the only writer
-    // to the panel and the only reader of the touch controller
+    esp_log_level_t lvl_rec = esp_log_level_get("AUDIO_RECORDER");
+    esp_log_level_set("AUDIO_RECORDER", ESP_LOG_ERROR);
+
+    game_init();
+    touch_pressed = false;
+
     lvgl_port_lock(0);
     reset_timer(hdl_display_timer, 0, true);
     display_set_backlight(true, false);
+    lv_obj_t *scr_prev = lv_scr_act();
+    lv_obj_t *scr_app = lv_obj_create(NULL);
+    lv_obj_clear_flag(scr_app, LV_OBJ_FLAG_SCROLLABLE);
+    // CONFIG_LV_COLOR_16_SWAP matches the byte-swapped RGB565 the game renders
+    app_img_dsc = (lv_img_dsc_t){
+        .header = {
+            .cf = LV_IMG_CF_TRUE_COLOR,
+            .w = GAME_W,
+            .h = GAME_H,
+        },
+        .data_size = GAME_W * GAME_H * sizeof(uint16_t),
+        .data = (const uint8_t *)fb,
+    };
+    lv_obj_t *img = lv_img_create(scr_app);
+    lv_img_set_src(img, &app_img_dsc);
+    lv_obj_set_pos(img, 0, 0);
+    lv_obj_add_flag(img, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(img, cb_app_touch, LV_EVENT_ALL, NULL);
+    lv_scr_load(scr_app);
+    lvgl_port_unlock();
 
-    game_init();
-
+    // the launch long-press means a finger is still on the screen; require a
+    // release before the exit-corner hold starts counting
+    bool exit_armed = false;
     int exit_hold = 0;
     TickType_t last_wake = xTaskGetTickCount();
 
     while (true) {
-        bool pressed = false;
-        int x = 0, y = 0;
+        bool pressed = touch_pressed;
+        int x = touch_x, y = touch_y;
 
-        if (hdl_touch != NULL) {
-            uint16_t tx = 0, ty = 0;
-            uint8_t cnt = 0;
-            esp_lcd_touch_read_data(hdl_touch);
-            if (esp_lcd_touch_get_coordinates(hdl_touch, &tx, &ty, NULL, &cnt, 1) && cnt > 0) {
-                pressed = true;
-                x = tx;
-                y = ty;
-            }
+        if (!pressed) {
+            exit_armed = true;
         }
 
-        if (pressed && x > GAME_W - EXIT_ZONE_PX && y < EXIT_ZONE_PX) {
+        if (exit_armed && pressed && x > GAME_W - EXIT_ZONE_PX && y < EXIT_ZONE_PX) {
             if (++exit_hold >= EXIT_HOLD_FRAMES) {
                 break;
             }
@@ -87,17 +137,25 @@ static void app_task(void *data)
 
         game_touch(pressed, x, y);
         game_update(1.0f / APP_FPS);
-        game_render(fb);
-        esp_lcd_panel_draw_bitmap(hdl_lcd, 0, 0, GAME_W, GAME_H, fb);
+
+        if (lvgl_port_lock(lvgl_lock_timeout)) {
+            game_render(fb);
+            lv_obj_invalidate(img);
+            lvgl_port_unlock();
+        }
 
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(1000 / APP_FPS));
     }
 
     ESP_LOGI(TAG, "app %d exiting", app);
 
-    lv_obj_invalidate(lv_scr_act());
+    lvgl_port_lock(0);
+    lv_scr_load(scr_prev);
+    lv_obj_del(scr_app);
     reset_timer(hdl_display_timer, config_get_int("display_timeout", DEFAULT_DISPLAY_TIMEOUT), false);
     lvgl_port_unlock();
+
+    esp_log_level_set("AUDIO_RECORDER", lvl_rec);
     audio_recorder_wakenet_enable(hdl_ar, true);
 
     heap_caps_free(fb);

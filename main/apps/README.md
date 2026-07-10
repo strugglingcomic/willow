@@ -36,20 +36,26 @@ re-copy.
 
 ```
 launch:  audio_recorder_wakenet_enable(false)   — no wake words, less CPU
-         lvgl_port_lock(0)                      — parks the LVGL task; we
-                                                  own panel + touch reads
+         mute AUDIO_RECORDER logs ("Not in speeching" floods while off)
          pause display-off timer, backlight on
-         loop @30fps on core 1: read GT911 → update → render →
-                                esp_lcd_panel_draw_bitmap(hdl_lcd, …)
-exit:    lv_obj_invalidate(lv_scr_act())        — force full LVGL redraw
-         restart display timer, lvgl_port_unlock()
+         load a new LVGL screen holding a full-screen lv_img backed by the
+         game framebuffer (LV_USE_CANVAS is compiled out); touch arrives
+         via LVGL events on the img
+         loop @30fps on core 1: game_touch/update → (under lvgl lock)
+                                game_render(fb) → lv_obj_invalidate(img)
+exit:    restore previous screen, delete app screen
+         restart display timer, restore log level
          audio_recorder_wakenet_enable(true)
 ```
 
-Framebuffer is 320×240×2 = 150 KB, allocated on launch (DMA-capable
-preferred, PSRAM fallback) and freed on exit. The SPI bus is configured with
-`max_transfer_sz` = full frame, so a single `draw_bitmap` per frame is fine.
+Rendering goes **through** LVGL, not around it: the canvas buffer is plain
+PSRAM (320×240×2 = 150 KB, allocated on launch, freed on exit) and the LVGL
+port copies chunks through its internal DMA bounce buffer on flush. Writing
+the PSRAM buffer straight to `esp_lcd_panel_draw_bitmap` does NOT work — the
+SPI driver rejects non-DMA-capable memory (`spi transmit (queue) color
+failed`), and there isn't 150 KB of contiguous internal DMA RAM at runtime.
+The game core's byte-swapped RGB565 output matches `CONFIG_LV_COLOR_16_SWAP`,
+so the canvas uses it as-is.
 
-While an app holds the LVGL lock, other Willow code paths that try
-`lvgl_port_lock(lvgl_lock_timeout)` time out and skip their UI updates —
-they already guard for that.
+The exit-corner hold only starts counting after the first touch release, so
+the launch long-press (finger still down) can't immediately exit the app.
