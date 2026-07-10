@@ -15,6 +15,7 @@ void init_logging(void)
     esp_log_level_set("AUDIO_RECORDER", ESP_LOG_INFO);
 #endif
 
+    esp_log_level_set("WILLOW/APPS", WILLOW_LOG_LEVEL);
     esp_log_level_set("WILLOW/AUDIO", WILLOW_LOG_LEVEL);
     esp_log_level_set("WILLOW/CONFIG", WILLOW_LOG_LEVEL);
     esp_log_level_set("WILLOW/DISPLAY", WILLOW_LOG_LEVEL);
